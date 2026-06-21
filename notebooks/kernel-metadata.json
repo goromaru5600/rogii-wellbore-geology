@@ -1,0 +1,13 @@
+{
+  "id": "gorubachohu/phase2-3-sw-ncc",
+  "title": "Phase2-3: Sliding Window NCC per-point TVT",
+  "code_file": "phase2_3_sw_ncc.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": [],
+  "competition_sources": ["rogii-wellbore-geology-prediction"],
+  "kernel_sources": []
+}
