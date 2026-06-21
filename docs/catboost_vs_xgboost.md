@@ -8,160 +8,191 @@ style: |
     font-family: 'Helvetica Neue', Arial, sans-serif;
   }
   table {
-    font-size: 0.85em;
+    font-size: 0.82em;
   }
   code {
-    font-size: 0.8em;
+    font-size: 0.78em;
+  }
+  h2 {
+    color: #2c3e50;
+  }
+  blockquote {
+    border-left: 4px solid #3498db;
+    padding-left: 12px;
+    color: #555;
   }
 ---
 
-# CatBoost vs XGBoost
-## 速度・精度・使い勝手の比較
+# CatBoost vs XGBoost vs LightGBM
+## 速度・精度・使い分けの判断基準
 
 Kaggle rogii-wellbore-geology コンペ文脈での整理
 
 ---
 
-## アルゴリズムの違い
+## アルゴリズムの違い（3行で）
 
-| | XGBoost | CatBoost |
-|---|---|---|
-| 木の構築 | Level-wise (深さ優先) | **Symmetric tree** (対称木) |
-| 分割探索 | 全特徴量を逐次スキャン | GPU並列 / 対称構造で効率化 |
-| カテゴリ変数 | エンコード必要 | **ネイティブ対応** |
-| 勾配計算 | 標準勾配ブースティング | **Ordered Boosting**（リーク防止）|
+| | XGBoost | LightGBM | CatBoost |
+|---|---|---|---|
+| 木の構築 | Level-wise | **Leaf-wise** | **Symmetric tree** |
+| 強み | 安定・実績 | 速度・大規模 | カテゴリ変数・小規模 |
+| 勾配計算 | 標準GB | GOSS (高速近似) | **Ordered Boosting** |
+| GPU恩恵 | 中 | 中 | **最大** |
 
-> CatBoost の Symmetric tree = 全ノードで同じ分割条件 → 予測が速い・過学習しにくい
+> **Leaf-wise**: 最も誤差が大きい葉だけ分割 → 少ない木数で深く学習
+> **Symmetric tree**: 全ノードで同じ分割条件 → 予測高速・過学習しにくい
+> **Ordered Boosting**: 勾配計算にリーク防止機構 → 小データで強い
 
 ---
 
-## 学習速度の比較（CPU）
+## 速度比較（CPU / GPU）
 
 ```
-データ: ~380万行 × 57特徴量 (rogii 訓練セット)
-GroupKFold 5fold × 1モデル
+データ規模: ~380万行 × 57特徴量 (rogii 訓練セット, GroupKFold 5fold)
 ```
 
-| モデル | iterations | 目安時間 (CPU) |
+| モデル | iterations | CPU 時間 | GPU 時間 | GPU 倍率 |
+|---|---|---|---|---|
+| XGBoost | 1,000 | ~5〜10 分 | ~1〜2 分 | 5〜10x |
+| LightGBM | 8,000 | ~15〜25 分 | ~5〜8 分 | 3〜5x |
+| **CatBoost** | **8,000** | **~30〜60 分** | **~3〜6 分** | **10〜20x** |
+
+**CPU では CatBoost が最も遅い。ただし GPU では最大の恩恵を受ける。**
+
+---
+
+## なぜ CatBoost は CPU で遅いのか
+
+### Ordered Boosting の計算コスト
+- 各サンプルの勾配を「時系列順に前のサンプルだけ」で計算
+- データを複数のパーミュテーションでシャッフルして繰り返す
+- → XGBoost の単純勾配計算より **3〜5倍の演算量**
+
+### Symmetric Tree の反動
+- 全ノードで同じ分割 → 深さを増やさないと表現力が出ない
+- iterations=8,000 ≈ XGBoost の n_estimators=500〜1,000 相当
+
+### GPU で逆転する理由
+- Symmetric tree は GPU の SIMD 並列計算と相性が良い
+- 全ノード同時に同じ演算 → GPU が得意なパターン
+
+---
+
+## 使い分けの判断フローチャート
+
+```
+データにカテゴリ変数が多い (high cardinality)?
+  └─ YES → CatBoost 一択（Target Encoding 不要、リーク防止済み）
+  └─ NO  →
+        データ行数 > 500万?
+          └─ YES → LightGBM（メモリ効率・速度で有利）
+          └─ NO  →
+                GPU が使える?
+                  └─ YES → CatBoost（精度とのトレードオフが最良）
+                  └─ NO  → LightGBM（速度と精度のバランス）
+```
+
+**XGBoost を選ぶ積極的な理由は現在ほぼない**（LGBMが上位互換に近い）
+
+---
+
+## 精度の使い分け基準
+
+| 状況 | 推奨 | 理由 |
 |---|---|---|
-| XGBoost | 1,000 | 約 5〜10 分 |
-| LightGBM | 8,000 | 約 15〜25 分 |
-| **CatBoost** | **8,000** | **約 30〜60 分** |
-
-**CatBoost は XGBoost の 5〜10倍 時間がかかる**
-→ CPU では特に遅い。GPU があれば 3〜5倍程度に縮まる
-
----
-
-## なぜ CatBoost は遅いのか
-
-### 1. Ordered Boosting
-- 各サンプルの勾配を「それより前のサンプルだけ」で計算
-- リーク防止のため計算量が増える
-
-### 2. 対称木 (Symmetric Tree)
-- 精度を出すには XGBoost より多くの木が必要になりやすい
-- iterations=8,000 は XGBoost の n_estimators=1,000 に相当することも
-
-### 3. カテゴリ変数の内部処理
-- 数値のみのデータでも内部オーバーヘッドがある
+| **カテゴリ変数が多い** | CatBoost | 内部Target Encodingが優秀 |
+| **数値特徴量のみ** | LightGBM | CB と精度差は小さく速い |
+| **小〜中規模データ** (<10万行) | CatBoost | Ordered Boostingでリーク防止 |
+| **大規模データ** (>500万行) | LightGBM | メモリ・速度で圧倒 |
+| **特徴量数が多い** (>500) | LightGBM | GOSS で高速な列サンプリング |
+| **アンサンブル目的** | **LGB + CB** | 予測の相関が低く多様性が出る |
 
 ---
 
-## GPU での比較
+## アンサンブルで LGB + CB を組み合わせる理由
 
-| | CPU | GPU |
-|---|---|---|
-| XGBoost | baseline | 5〜10x 高速 |
-| LightGBM | 速い | 3〜5x 高速 |
-| **CatBoost** | 遅い | **10〜50x 高速** ← GPU 恩恵が最大 |
-
-> CatBoost は GPU で最も恩恵を受けるモデル
-> Kaggle GPU (T4) を使えば 30〜60 分 → 5〜10 分 に短縮可能
-
----
-
-## 精度の傾向
-
-| シナリオ | 有利なモデル |
-|---|---|
-| カテゴリ変数が多い | **CatBoost** |
-| 数値特徴量のみ | LightGBM ≈ XGBoost |
-| 小〜中規模データ | **CatBoost** (Ordered Boosting でリーク防止) |
-| 大規模データ (1000万行+) | LightGBM |
-| アンサンブルの多様性 | CatBoost + LGB の組み合わせが有効 |
-
-rogii の場合: 数値特徴量のみ → **LightGBM と精度差は小さい**
-アンサンブルの多様性確保が主な目的
-
----
-
-## rogii Phase 2-4 での構成
+### 予測の多様性（相関の低さ）が重要
 
 ```python
-# LightGBM × 3 seeds  (speed重視、多様性確保)
+# OOF 予測の相関を確認するのが基本
+import numpy as np
+corr = np.corrcoef(oof_lgb, oof_cb)[0,1]
+# 相関が 0.95 未満なら組み合わせる価値あり
+# → LGB と CB は内部アルゴリズムが全く異なるので相関が下がりやすい
+```
+
+| ペア | 典型的相関 | アンサンブル効果 |
+|---|---|---|
+| LGB seed1 vs seed2 | ~0.99 | 小さい |
+| LGB vs XGBoost | ~0.97 | 小さい |
+| **LGB vs CatBoost** | **~0.90〜0.95** | **大きい** |
+
+---
+
+## Kaggle での実践的な使い分け
+
+### CPU 環境（無料枠・デフォルト）
+```
+XGBoost  → 素早く動かしてベースラインを作る
+LightGBM → メインモデル（速度・精度のバランス最良）
+CatBoost → iterations を 3,000〜5,000 に抑えて追加
+```
+
+### GPU 環境（T4 / P100）
+```
+LightGBM → CPU のまま or device='gpu' で高速化
+CatBoost → task_type='GPU' で 10〜20x 高速化 → メインに昇格可能
+```
+
+> **結論**: GPU があれば CatBoost を積極的に使う。CPU のみなら LightGBM 中心で CB は iterations 少なめに。
+
+---
+
+## パラメータ対応表（移植時の参考）
+
+| 概念 | XGBoost | LightGBM | CatBoost |
+|---|---|---|---|
+| 木の数 | `n_estimators` | `n_estimators` | `iterations` |
+| 学習率 | `learning_rate` | `learning_rate` | `learning_rate` |
+| 木の深さ | `max_depth` | `max_depth` / `num_leaves` | `depth` |
+| 正則化 (L2) | `reg_lambda` | `reg_lambda` | `l2_leaf_reg` |
+| サブサンプル | `subsample` | `subsample` | `subsample` |
+| 早期終了 | `early_stopping_rounds` | `callbacks=[early_stopping()]` | `od_wait` |
+| GPU 有効化 | `device='cuda'` | `device='gpu'` | `task_type='GPU'` |
+
+---
+
+## rogii Phase 2-4 での構成と判断根拠
+
+```python
+# LightGBM × 3 seeds → メイン（速度・安定性）
 LGB_CONFIGS = [
     dict(learning_rate=0.025, n_estimators=8000, seed=42),
     dict(learning_rate=0.020, n_estimators=8000, seed=7),
     dict(learning_rate=0.030, n_estimators=8000, seed=123),
 ]
-
-# CatBoost × 1  (多様性の追加、精度補完)
-CB_PARAMS = dict(
-    iterations=8000, depth=7, od_type='Iter', od_wait=300
-)
-
-# Ridge Stacking で重み最適化
+# CatBoost × 1 + GPU → 多様性確保（CB は内部アルゴリズムが異なる）
+CB_PARAMS = dict(iterations=8000, depth=7, task_type='GPU', od_wait=300)
+# Ridge Stacking → 重みを OOF で最適化（正値制約付き）
 ridge = Ridge(alpha=1., positive=True)
 ```
 
-総計: **4モデル × 5fold = 20モデル** → Kaggle 9h タイムアウトに注意
+**XGBoost を外した理由**: LightGBM と相関が高い割に速度が遅い → 多様性への貢献が薄い
 
 ---
 
-## タイムアウトリスク
+## まとめ：使い分けチートシート
 
-Kaggle notebook の制限: **9時間**
-
-| 処理 | 推定時間 |
+| 判断軸 | 選択 |
 |---|---|
-| データ読み込み + 特徴量生成 | ~20 分 |
-| LGB × 3 seeds × 5 fold | ~75〜125 分 |
-| CatBoost × 5 fold | ~150〜300 分 |
-| **合計** | **~4〜7 時間** |
+| カテゴリ変数が主役 | **CatBoost** |
+| 数値特徴量のみ・大規模 | **LightGBM** |
+| GPU あり | **CatBoost** を積極採用 |
+| CPU のみ・時間制限あり | **LightGBM** メイン、CB は iterations 減 |
+| アンサンブル | **LGB × 複数seed + CB × 1** が鉄板 |
+| XGBoost を選ぶ場面 | 既存コードの流用 / 互換性重視のみ |
 
-ギリギリのライン。もしタイムアウトするなら:
-- CB の `iterations` を 5,000 に下げる
-- CB を抜いて LGB × 3 のみにする
-
----
-
-## まとめ
-
-| 観点 | 結論 |
-|---|---|
-| 速度 | XGBoost > LightGBM > CatBoost (CPU) |
-| GPU 恩恵 | CatBoost が最大 |
-| 精度 (数値特徴量) | LightGBM ≈ CatBoost > XGBoost |
-| アンサンブル効果 | LGB + CB の組み合わせが鉄板 |
-| rogii での用途 | 多様性確保 + 精度補完 |
-
-> **Phase 2-4 でのリスク**: CatBoost が 9h タイムアウトを引き起こす可能性あり
-> → LB が出ない場合は CB を削除した版を試す
-
----
-
-## 参考: 上位解 (LB 9.934) の構成
-
-```python
-# LightGBM × 3 seeds + CatBoost × 1
-# Ridge stacking (positive weights)
-# → rogii Phase 2-4 と同じ構成を採用済み
-```
-
-競合もほぼ同じ構成 → **モデル選択より特徴量が重要**
-
-Formation 特徴量 (ANCC/ASTNU 等) が本質的な差分
+> **今回の rogii**: 数値特徴量のみ → LGB メイン、GPU 有効で CB 追加、XGB 不使用
 
 ---
 
