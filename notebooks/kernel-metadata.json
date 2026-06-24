@@ -1,7 +1,7 @@
 {
-  "id": "gorubachohu/phase2-4c-formation-fixed",
-  "title": "Phase2-4c: Formation Fixed LGB CB",
-  "code_file": "phase2_4c_formation_fixed.ipynb",
+  "id": "gorubachohu/phase2-5-formation-knn",
+  "title": "Phase2-5: Formation KNN + WLS + GR Multi-scale",
+  "code_file": "phase2_5_formation_knn.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
